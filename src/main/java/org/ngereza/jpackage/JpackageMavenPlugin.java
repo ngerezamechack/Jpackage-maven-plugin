@@ -6,12 +6,16 @@ package org.ngereza.jpackage;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Set;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
+import java.util.jar.JarOutputStream;
 import org.apache.commons.exec.CommandLine;
 import org.apache.commons.exec.DefaultExecuteResultHandler;
 import org.apache.commons.exec.DefaultExecutor;
@@ -20,7 +24,6 @@ import org.apache.commons.exec.Executor;
 import org.apache.commons.exec.PumpStreamHandler;
 import org.apache.maven.artifact.Artifact;
 import org.apache.maven.plugin.AbstractMojo;
-import org.apache.maven.plugin.MojoExecutionException;
 import org.apache.maven.plugin.MojoFailureException;
 import org.apache.maven.plugins.annotations.LifecyclePhase;
 import org.apache.maven.plugins.annotations.Mojo;
@@ -62,7 +65,7 @@ public class JpackageMavenPlugin extends AbstractMojo {
 
     @Parameter(required = true)
     private String vendor;
-    
+
     @Parameter(defaultValue = "base")
     private String multiRelease;
 
@@ -73,8 +76,9 @@ public class JpackageMavenPlugin extends AbstractMojo {
     private List<String> jvmOption;
 
     @Override
-    public void execute() throws MojoExecutionException, MojoFailureException {
+    public void execute() {
         try {
+            //
             String targetDir = new File(project.getBuild().getOutputDirectory()).getParentFile().getAbsolutePath() + File.separator;
             String javaBin = System.getProperty("java.home") + File.separator + "bin" + File.separator;
 
@@ -90,33 +94,16 @@ public class JpackageMavenPlugin extends AbstractMojo {
             Files.createDirectories(Path.of(jarDir));
 
             System.out.println("""
+                               
                                **********************************************************************
-                               ******************* COPY JARs DEPENDENIES *****************************
+                               *********************** COPY DEPENDENIES *****************************
                                **********************************************************************
                                
                                """);
 
-            project.getArtifacts().forEach((Artifact t) -> {
-                try {
-                    File artifact = t.getFile();
-                    String absolute = artifact.getAbsolutePath();
-                    String dest = jarDir + artifact.getName();
-                    getLog().debug("Copy dependency : " + absolute + " to " + dest);
-                    Files.copy(Path.of(absolute), Path.of(dest), StandardCopyOption.REPLACE_EXISTING);
-                } catch (IOException ex) {
-                    getLog().error(ex);
-                }
-            });
+            copyClasses(project.getArtifacts(), finalJar, jarDir + mainJar);
 
-            System.out.println("""
-                               **********************************************************************
-                               ********************* COPY MAIN-JAR  *********************************
-                               **********************************************************************
-                               
-                               """);
-            Files.copy(Path.of(finalJar), Path.of(jarDir + mainJar), StandardCopyOption.REPLACE_EXISTING);
-
-            System.out.println(" *************** JARs DEPENDENCIES COPIED ******************************\n\n\n");
+            System.out.println(" ************************* DEPENDENCIES  COPIED ******************************\n\n\n");
             //
             System.out.println("""
                                **********************************************************************
@@ -128,7 +115,7 @@ public class JpackageMavenPlugin extends AbstractMojo {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             String jdepsArgs = " --ignore-missing-deps "
                     + "--no-recursive  "
-                    + "--multi-release "+multiRelease
+                    + "--multi-release " + multiRelease
                     + " --print-module-deps "
                     + " \"" + jarDir + "*.jar\" ";
 
@@ -203,7 +190,7 @@ public class JpackageMavenPlugin extends AbstractMojo {
             deleDirIfExists(Path.of(finalappDir));
             String jpackageArgs = " --type app-image --runtime-image \"" + runtime + "\" --input \"" + jarDir + "\" "
                     + " --main-jar \"" + mainJar + "\" --name \"" + appName + "\" --icon \"" + icon + "\" "
-                    + " --main-class \"" + mainClass + "\" "+getMainArg()+" "+getVMOptions()+" "
+                    + " --main-class \"" + mainClass + "\" " + getMainArg() + " " + getVMOptions() + " "
                     + " --verbose  --dest \"" + project.getBasedir() + "\" "
                     + " --copyright \"" + vendor + "\" --vendor \"" + vendor + "\" --app-version \"" + appVersion + "\" ";
 
@@ -229,6 +216,9 @@ public class JpackageMavenPlugin extends AbstractMojo {
                 throw new MojoFailureException("Error...");
             }
 
+            deleDirIfExists(Path.of(jarDir));
+            deleDirIfExists(Path.of(runtime));
+
             System.out.println("*********************** SUCCES! ******************************\n\n\n");
             //
         } catch (Exception e) {
@@ -243,29 +233,100 @@ public class JpackageMavenPlugin extends AbstractMojo {
                     .map(Path::toFile).forEach(File::delete);
         }
     }
-    
+
     private String opt;
-    private String getVMOptions(){
+
+    private String getVMOptions() {
         opt = "";
-        if(jvmOption != null){
+        if (jvmOption != null) {
             jvmOption.forEach((String t) -> {
-                opt = " --java-options \""+t+"\" ";
+                opt = " --java-options \"" + t + "\" ";
             });
         }
         return opt;
     }
-    
+
     private String args;
-    private String getMainArg(){
+
+    private String getMainArg() {
         args = "";
-        if(mainArgs != null){
+        if (mainArgs != null) {
             mainArgs.forEach((String t) -> {
-                args += " "+t+" ";
+                args += " " + t + " ";
             });
-            if(!args.isBlank()){
-                args = " --arguments \""+args+"\" "; 
+            if (!args.isBlank()) {
+                args = " --arguments \"" + args + "\" ";
             }
         }
         return args;
+    }
+
+    private JarFile jarfile = null;
+    private JarOutputStream mainJarFile = null;
+
+    private void copyClasses(Set<Artifact> artifacts, String finalJarName, String jarDest) throws IOException {
+
+        mainJarFile = new JarOutputStream(new FileOutputStream(jarDest));
+        //
+        //main Jar
+        jarfile = new JarFile(finalJarName);
+        jarfile.entries().asIterator().forEachRemaining((JarEntry t) -> {
+            String name = t.getRealName();
+
+            System.out.println(name);
+
+            try {
+
+                mainJarFile.putNextEntry(t);
+                mainJarFile.write(jarfile.getInputStream(t).readAllBytes());
+                mainJarFile.closeEntry();
+
+            } catch (IOException ex) {
+                System.err.println(ex);
+            }
+        });
+
+        artifacts.forEach((Artifact artifact) -> {
+            //
+            try {
+                //
+                jarfile = new JarFile(artifact.getFile().getAbsolutePath());
+                jarfile.entries().asIterator().forEachRemaining((JarEntry t) -> {
+                    String name = t.getRealName();
+
+                    if (!name.equals("module-info.class") && !isExclude(name)) {
+                        System.out.println(name);
+
+                        try {
+
+                            mainJarFile.putNextEntry(t);
+                            mainJarFile.write(jarfile.getInputStream(t).readAllBytes());
+                            mainJarFile.closeEntry();
+
+                        } catch (IOException ex) {
+                            System.err.println(ex);
+                        }
+                    }
+                });
+            } catch (Exception e) {
+                System.err.println(e);
+            }
+        });
+
+        mainJarFile.close();
+
+    }
+
+    private boolean isExclude(String excl) {
+
+        String[] excludes = {".SF", ".DSA", ".RSA", "MANIFEST.MF", "LICENSE", "LICENSE.txt",
+            "LICENSE.APACHE2", "LICENSE.md", "NOTICE", "NOTICE.md", "NOTICE.txt"};
+
+        for (String e : excludes) {
+            if (excl.endsWith(e)) {
+                return true;
+            }
+        }
+        return false;
     }
 }
